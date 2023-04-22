@@ -1,0 +1,4 @@
+rich
+recordtype
+python-dotenv
+docker

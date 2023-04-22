@@ -1,0 +1,345 @@
+version: '3.5'
+
+networks:
+  default:
+    name: iris
+    driver: bridge
+#    external: false # To Join any other app setup using another network, change name and set external = true
+
+# will contain all elasticsearch data.
+volumes:
+  elasticsearch-data:
+  prometheus_data:
+  grafana_data:
+  mongodb:
+
+secrets:
+  elasticsearch.keystore:
+    file: ../secrets/keystore/elasticsearch.keystore
+  elasticsearch.service_tokens:
+    file: ../secrets/service_tokens
+  elastic.ca:
+    file: ../secrets/certs/ca/ca.crt
+  elasticsearch.certificate:
+    file: ../secrets/certs/elasticsearch/elasticsearch.crt
+  elasticsearch.key:
+    file: ../secrets/certs/elasticsearch/elasticsearch.key
+  kibana.certificate:
+    file: ../secrets/certs/kibana/kibana.crt
+  kibana.key:
+    file: ../secrets/certs/kibana/kibana.key
+  apm-server.certificate:
+    file: ../secrets/certs/apm-server/apm-server.crt
+  apm-server.key:
+    file: ../secrets/certs/apm-server/apm-server.key
+
+services:
+  #=================================================================================
+  # Iris Services
+  #=================================================================================
+
+  #=================================================================================
+  # Databases & Message Brokers
+  #=================================================================================
+  mongo:
+    container_name: iris-mongo
+    image: mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb:/data/db
+
+  nats-streaming:
+    container_name: iris-nats-streaming
+    image: nats-streaming:latest
+    ports:
+      - "4222:4222"
+
+  #=================================================================================
+  # ELK Stack
+  #=================================================================================
+  elasticsearch:
+    container_name: iris-elasticsearch
+    build:
+      context: ../services/elasticsearch/
+      args:
+        ELK_VERSION: ${ELK_VERSION}
+    restart: unless-stopped
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ELASTIC_CLUSTER_NAME: ${ELASTIC_CLUSTER_NAME}
+      ELASTIC_NODE_NAME: ${ELASTIC_NODE_NAME}
+      ELASTIC_INIT_MASTER_NODE: ${ELASTIC_INIT_MASTER_NODE}
+      ELASTIC_DISCOVERY_SEEDS: ${ELASTIC_DISCOVERY_SEEDS}
+      ES_JAVA_OPTS: "-Xmx${ELASTICSEARCH_HEAP} -Xms${ELASTICSEARCH_HEAP} -Des.enforce.bootstrap.checks=true -Dlog4j2.formatMsgNoLookups=true"
+      bootstrap.memory_lock: "true"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+      - ../services/elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+      - ../services/elasticsearch/config/log4j2.properties:/usr/share/elasticsearch/config/log4j2.properties
+    secrets:
+      - source: elasticsearch.keystore
+        target: /usr/share/elasticsearch/config/elasticsearch.keystore
+      - source: elasticsearch.service_tokens
+        target: /usr/share/elasticsearch/config/service_tokens
+      - source: elastic.ca
+        target: /usr/share/elasticsearch/config/certs/ca.crt
+      - source: elasticsearch.certificate
+        target: /usr/share/elasticsearch/config/certs/elasticsearch.crt
+      - source: elasticsearch.key
+        target: /usr/share/elasticsearch/config/certs/elasticsearch.key
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 200000
+        hard: 200000
+    healthcheck:
+      test: [ "CMD", "sh", "-c", "curl -sf --insecure https://$ELASTIC_USERNAME:$ELASTIC_PASSWORD@localhost:9200/_cat/health | grep -ioE 'green|yellow' || echo 'not green/yellow cluster status'" ]
+
+  logstash:
+    container_name: iris-logstash
+    build:
+      context: ../services/logstash/
+      args:
+        ELK_VERSION: $ELK_VERSION
+    restart: unless-stopped
+    volumes:
+      - ../services/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ../services/logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ../services/logstash/pipeline:/usr/share/logstash/pipeline:ro
+    secrets:
+      - source: elastic.ca
+        target: /certs/ca.crt
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+      LS_JAVA_OPTS: "-Xmx${LOGSTASH_HEAP} -Xms${LOGSTASH_HEAP} -Dlog4j2.formatMsgNoLookups=true"
+    ports:
+      - "5044:5044"
+      - "9600:9600"
+      - "50000:50000/tcp"
+      - "50000:50000/udp"
+    healthcheck:
+      test: [ "CMD", "curl", "-s" ,"-XGET", "http://127.0.0.1:9600" ]
+
+  kibana:
+    container_name: iris-kibana
+    build:
+      context: ../services/kibana/
+      args:
+        ELK_VERSION: $ELK_VERSION
+    restart: unless-stopped
+    volumes:
+      - ../services/kibana/config/:/usr/share/kibana/config:ro
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+    env_file:
+      - ../secrets/.env.kibana.token
+    secrets:
+      - source: elastic.ca
+        target: /certs/ca.crt
+      - source: kibana.certificate
+        target: /certs/kibana.crt
+      - source: kibana.key
+        target: /certs/kibana.key
+    ports:
+      - "5601:5601"
+
+  apm-server:
+    container_name: iris-apm-server
+    build:
+      context: ../services/apm-server/
+      args:
+        ELK_VERSION: $ELK_VERSION
+    restart: unless-stopped
+    ports:
+      - "8200:8200"
+    volumes:
+      - ../services/apm-server/config/apm-server.yml:/usr/share/apm-server/apm-server.yml:ro
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+      ELASTIC_APM_SECRET_TOKEN: ${ELASTIC_APM_SECRET_TOKEN}
+    secrets:
+      - source: elastic.ca
+        target: /certs/ca.crt
+      - source: apm-server.certificate
+        target: /certs/apm-server.crt
+      - source: apm-server.key
+        target: /certs/apm-server.key
+
+  #=================================================================================
+  # Metrics
+  #=================================================================================
+
+  prometheus:
+    container_name: iris-prometheus
+    image: prom/prometheus:v2.42.0
+    volumes:
+      - ../services/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    expose:
+      - 9090
+    labels:
+      org.label-schema.group: "monitoring"
+
+  alertmanager:
+    container_name: iris-alertmanager
+    image: prom/alertmanager:v0.25.0
+    volumes:
+      - ../services/alertmanager:/etc/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+    restart: unless-stopped
+    expose:
+      - 9093
+    labels:
+      org.label-schema.group: "monitoring"
+
+  cadvisor:
+    container_name: iris-cadvisor
+    image: gcr.io/cadvisor/cadvisor:v0.47.1
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      #- /cgroup:/cgroup:ro #doesn't work on MacOS only for Linux
+    restart: unless-stopped
+    expose:
+      - 8080
+    labels:
+      org.label-schema.group: "monitoring"
+
+  grafana:
+    container_name: iris-grafana
+    image: grafana/grafana:9.4.1
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../services/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./services/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    expose:
+      - 3000
+    labels:
+      org.label-schema.group: "monitoring"
+
+  pushgateway:
+    container_name: iris-pushgateway
+    image: prom/pushgateway:v1.5.1
+    restart: unless-stopped
+    expose:
+      - 9091
+    labels:
+      org.label-schema.group: "monitoring"
+
+  caddy:
+    container_name: iris-caddy
+    image: caddy:2.6.4
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+      - "9090:9090"
+      - "9093:9093"
+      - "9091:9091"
+    volumes:
+      - ../services/caddy:/etc/caddy
+    environment:
+      - ADMIN_USER=${GF_ADMIN_USER}
+      - ADMIN_PASSWORD=${GF_ADMIN_PASSWORD}
+      - ADMIN_PASSWORD_HASH=${GF_ADMIN_PASSWORD_HASH}
+    restart: unless-stopped
+    labels:
+      org.label-schema.group: "monitoring"
+
+  #=================================================================================
+  # Data Exporters
+  #=================================================================================
+
+  # Elasticsearch exporter for Prometheus
+  elasticsearch-exporter:
+    container_name: iris-elasticsearch-exporter
+    image: justwatch/elasticsearch_exporter:1.1.0
+    restart: always
+    command: [ "--es.uri", "https://${ELASTIC_USERNAME}:${ELASTIC_PASSWORD}@${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}",
+               "--es.ssl-skip-verify",
+               "--es.all",
+               "--es.snapshots",
+               "--es.indices" ]
+    ports:
+      - "9114:9114"
+
+  # Exporting Prometheus metrics from Logstash
+  logstash-exporter:
+    container_name: iris-logstash-exporter
+    image: alxrem/prometheus-logstash-exporter
+    restart: always
+    ports:
+      - "9304:9304"
+    command: [ "-logstash.host", "${LOGSTASH_HOST}" ]
+
+  # Collecting docker cluster logs
+  filebeat-cluster-logs:
+    container_name: iris-filebeat
+    image: docker.elastic.co/beats/filebeat:${ELK_VERSION}
+    restart: always
+    # -e flag to log to stderr and disable syslog/file output
+    command: -e --strict.perms=false
+    user: root
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USERNAME}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_HOST_PORT: ${KIBANA_HOST}:${KIBANA_PORT}
+      ELASTICSEARCH_HOST_PORT: https://${ELASTICSEARCH_HOST}:${ELASTICSEARCH_PORT}
+    volumes:
+      - ../services/filebeat/filebeat.monitoring.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # Collecting node information
+  nodeexporter:
+    container_name: iris-node-exporter
+    image: prom/node-exporter:v1.5.0
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+    expose:
+      - 9100
+    labels:
+      org.label-schema.group: "monitoring"

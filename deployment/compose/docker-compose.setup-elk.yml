@@ -1,0 +1,26 @@
+version: '3.5'
+
+services:
+  keystore:
+    build:
+      context: ../services/elasticsearch/
+      args:
+        ELK_VERSION: ${ELK_VERSION}
+    command: bash /setup/setup-keystore.sh
+    user: "0"
+    volumes:
+        - ../secrets:/secrets
+        - ../scripts/setup-elk/:/setup/
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+
+  certs:
+    build:
+      context: ../services/elasticsearch/
+      args:
+        ELK_VERSION: ${ELK_VERSION}
+    command: bash /setup/setup-certs.sh
+    user: "0"
+    volumes:
+      - ../secrets:/secrets
+      - ../scripts/setup-elk:/setup
